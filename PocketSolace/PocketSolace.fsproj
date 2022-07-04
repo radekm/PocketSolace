@@ -3,7 +3,29 @@
     <PropertyGroup>
         <TargetFramework>net6.0</TargetFramework>
         <GenerateDocumentationFile>true</GenerateDocumentationFile>
+
+        <PackageId>PocketSolace</PackageId>
+        <PackageVersion>0.1.0</PackageVersion>
+        <Authors>Radek Micek</Authors>
+        <Copyright>Copyright (c) Radek Micek 2022</Copyright>
+        <PackageLicenseExpression>MIT</PackageLicenseExpression>
+        <Description>
+            Package for subscribing to Solace direct messages from F#.
+            Provided interface fits nicely in async code using
+            System.Threading.Tasks and Microsoft.Extensions.Logging.
+        </Description>
+
+        <!-- Source Link -->
+        <PublishRepositoryUrl>true</PublishRepositoryUrl>
+        <EmbedUntrackedSources>true</EmbedUntrackedSources>
+        <IncludeSymbols>true</IncludeSymbols>
+        <SymbolPackageFormat>snupkg</SymbolPackageFormat>
     </PropertyGroup>
+
+    <!-- Source Link -->
+    <ItemGroup>
+        <PackageReference Include="Microsoft.SourceLink.GitHub" Version="1.1.1" PrivateAssets="All" />
+    </ItemGroup>
 
     <ItemGroup>
         <Compile Include="Library.fs" />
