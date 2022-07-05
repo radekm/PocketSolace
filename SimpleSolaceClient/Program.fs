@@ -43,6 +43,9 @@ let main _ =
 
         // Stay connected for 20 seconds.
         do! Task.Delay(20_000)
+        
+        // Not necessary.
+        do! solace.Unsubscribe(testTopic)        
     }
 
     Task.WaitAll(channelTask, sessionTask)

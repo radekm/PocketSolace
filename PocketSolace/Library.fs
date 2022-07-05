@@ -9,10 +9,9 @@ open SolaceSystems.Solclient.Messaging
 
 type ISolace =
     abstract Subscribe : string -> Task
+    abstract Unsubscribe : string -> Task
 
     // TODO
-    // abstract Unsubscribe : string -> Task
-    //
     // abstract CreateMessage : string -> IMessage
     // abstract Send : IMessage -> Task
 
@@ -47,6 +46,16 @@ type private Solace
             match! Task.Run(fun () -> session.Subscribe(topic, true)) with
             | ReturnCode.SOLCLIENT_OK -> ()
             | code -> failwith $"Unexpected return code from Session.Subscribe: %A{code}"
+        }
+
+        override me.Unsubscribe(pattern : string) = backgroundTask {
+            use topic = ContextFactory.Instance.CreateTopic(pattern)
+
+            // Unfortunately we use blocking `Unsubscribe`.
+            // For more details see `Subscribe`.
+            match! Task.Run(fun () -> session.Unsubscribe(topic, true)) with
+            | ReturnCode.SOLCLIENT_OK -> ()
+            | code -> failwith $"Unexpected return code from Session.Unsubscribe: %A{code}"
         }
 
         override _.TerminationReason = terminationReason.Task
