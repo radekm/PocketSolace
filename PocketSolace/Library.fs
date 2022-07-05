@@ -11,9 +11,9 @@ type ISolace =
     abstract Subscribe : string -> Task
     abstract Unsubscribe : string -> Task
 
-    // TODO
-    // abstract CreateMessage : string -> IMessage
-    // abstract Send : IMessage -> Task
+    abstract CreateTopic : string -> ITopic
+    abstract CreateMessage : unit -> IMessage
+    abstract Send : IMessage -> Task
 
     abstract TerminationReason : Task
 
@@ -22,6 +22,18 @@ type ISolace =
 
     inherit IAsyncDisposable
 
+[<Sealed>]
+type private CanSendSignal() =
+    // It's crucial to use `TaskCreationOptions.RunContinuationsAsynchronously`.
+    [<VolatileField>]
+    let mutable tcs = TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)
+
+    member _.Next = tcs.Task
+
+    member _.Signal() =
+        tcs.SetResult()
+        tcs <- TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)
+
 // Implementation must ensure that Solace functions are not executed from Solace context thread.
 // That means that all `TaskCompletionSource`s which are set in message handler or in session event handler
 // are created with `TaskCreationOptions.RunContinuationsAsynchronously`.
@@ -29,6 +41,7 @@ type private Solace
     ( logger : ILogger,
       session : ISession,
 
+      canSend : CanSendSignal,
       terminationReason : TaskCompletionSource,
       writer : ChannelWriter<IMessage>,
 
@@ -36,7 +49,7 @@ type private Solace
     ) =
 
     interface ISolace with
-        override me.Subscribe(pattern : string) = backgroundTask {
+        override _.Subscribe(pattern : string) = backgroundTask {
             use topic = ContextFactory.Instance.CreateTopic(pattern)
 
             // Unfortunately we use blocking `Subscribe`.
@@ -48,7 +61,7 @@ type private Solace
             | code -> failwith $"Unexpected return code from Session.Subscribe: %A{code}"
         }
 
-        override me.Unsubscribe(pattern : string) = backgroundTask {
+        override _.Unsubscribe(pattern : string) = backgroundTask {
             use topic = ContextFactory.Instance.CreateTopic(pattern)
 
             // Unfortunately we use blocking `Unsubscribe`.
@@ -56,6 +69,31 @@ type private Solace
             match! Task.Run(fun () -> session.Unsubscribe(topic, true)) with
             | ReturnCode.SOLCLIENT_OK -> ()
             | code -> failwith $"Unexpected return code from Session.Unsubscribe: %A{code}"
+        }
+
+        override _.CreateTopic(name : string) = ContextFactory.Instance.CreateTopic(name)
+        override _.CreateMessage() = session.CreateMessage()
+        override _.Send(msg : IMessage) = backgroundTask {
+            let mutable sent = false
+
+            while not sent do
+                if terminationReason.Task.IsCompleted then
+                    failwith "Solace is terminating"
+
+                // `canSend` contains a task which will be completed after next `CanSend` session event is received.
+                //
+                // We must store `canSend` task before calling `session.Send`.
+                // Because `CanSend` session event can be received immediately after calling `session.Send`
+                // even before the call to `canSend.Next` happens. And thus task returned by `canSend.Next`
+                // would be waiting for another `CanSend` which may never happen.
+                let canSend = canSend.Next
+                match session.Send(msg) with
+                | ReturnCode.SOLCLIENT_OK -> sent <- true
+                | ReturnCode.SOLCLIENT_WOULD_BLOCK ->
+                    logger.LogDebug("Waiting for CanSend session event")
+                    let! _ = Task.WhenAny(canSend, terminationReason.Task)
+                    ()
+                | code -> failwith $"Unexpected return code from Session.Send: %A{code}"
         }
 
         override _.TerminationReason = terminationReason.Task
@@ -123,6 +161,7 @@ module Solace =
                     )
 
                 let connected = TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)
+                let canSend = CanSendSignal()
 
                 use _ = defer  (fun () -> logger.LogDebug("Solace session disposed (or never created)"))
                 use session =
@@ -138,6 +177,9 @@ module Solace =
                             | SessionEvent.UpNotice -> connected.SetResult()
                             | SessionEvent.ConnectFailedError ->
                                 connected.SetException(Exception $"Session not connected: %s{args.Info}")
+                            | SessionEvent.CanSend ->
+                                logger.LogDebug("CanSend session event received")
+                                canSend.Signal()
                             | SessionEvent.DownError ->
                                 Exception $"Session down: %s{args.Info}"
                                 |> terminateWithException
@@ -156,7 +198,7 @@ module Solace =
                 // to exception and call `terminateWithException`.
                 do! connected.Task
 
-                Solace(logger, session, terminationReason, writer, terminated)
+                Solace(logger, session, canSend, terminationReason, writer, terminated)
                 |> connectResult.SetResult
 
                 logger.LogDebug("Solace session connected, waiting for termination")
