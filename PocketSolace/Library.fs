@@ -7,13 +7,19 @@ open System.Threading.Tasks
 open Microsoft.Extensions.Logging
 open SolaceSystems.Solclient.Messaging
 
+/// Implementations must satisfy:
+/// - When terminating first `TerminationReason` is set THEN channel with received messages is marked as complete.
+/// - If terminating because user called `DisposeAsync` then `TerminationReason` must not contain exception
+///   and channel with received messages must be completed without exception.
+/// - If terminating because of error then `TerminationReason` must contain exception
+///   and channel with received messages must be completed with exception.
+/// - Messages sent BEFORE calling `DisposeAsync` must be delivered to broker unless an error occurs.
 type ISolace =
     abstract Subscribe : string -> Task
     abstract Unsubscribe : string -> Task
 
-    abstract CreateTopic : string -> ITopic
-    abstract CreateMessage : unit -> IMessage
-    abstract Send : IMessage -> Task
+    abstract Received : ChannelReader<IncomingMetadata * RawMessage>
+    abstract Send : RawMessage -> Task
 
     abstract TerminationReason : Task
 
@@ -43,10 +49,21 @@ type private Solace
 
       canSend : CanSendSignal,
       terminationReason : TaskCompletionSource,
-      writer : ChannelWriter<IMessage>,
+      receiveChannel : Channel<IncomingMetadata * RawMessage>,
 
       terminated : TaskCompletionSource
     ) =
+
+    let toSolaceMsg (msg : RawMessage) : IMessage =
+        let solaceMsg = session.CreateMessage()
+        solaceMsg.Destination <- ContextFactory.Instance.CreateTopic msg.Topic
+        msg.ReplyTo |> Option.iter (fun x -> solaceMsg.ReplyTo <- ContextFactory.Instance.CreateTopic x)
+        msg.ContentType |> Option.iter (fun x -> solaceMsg.HttpContentType <- x)
+        msg.ContentEncoding |> Option.iter (fun x -> solaceMsg.HttpContentEncoding <- x)
+        msg.CorrelationId |> Option.iter (fun x -> solaceMsg.CorrelationId <- x)
+        msg.SenderId |> Option.iter (fun x -> solaceMsg.SenderId <- x)
+        solaceMsg.BinaryAttachment <- msg.Payload
+        solaceMsg
 
     interface ISolace with
         override _.Subscribe(pattern : string) = backgroundTask {
@@ -71,9 +88,9 @@ type private Solace
             | code -> failwith $"Unexpected return code from Session.Unsubscribe: %A{code}"
         }
 
-        override _.CreateTopic(name : string) = ContextFactory.Instance.CreateTopic(name)
-        override _.CreateMessage() = session.CreateMessage()
-        override _.Send(msg : IMessage) = backgroundTask {
+        override _.Received = receiveChannel.Reader
+        override _.Send(msg : RawMessage) = backgroundTask {
+            use solaceMsg = toSolaceMsg msg
             let mutable sent = false
 
             while not sent do
@@ -87,7 +104,7 @@ type private Solace
                 // even before the call to `canSend.Next` happens. And thus task returned by `canSend.Next`
                 // would be waiting for another `CanSend` which may never happen.
                 let canSend = canSend.Next
-                match session.Send(msg) with
+                match session.Send solaceMsg with
                 | ReturnCode.SOLCLIENT_OK -> sent <- true
                 | ReturnCode.SOLCLIENT_WOULD_BLOCK ->
                     logger.LogDebug("Waiting for CanSend session event")
@@ -102,7 +119,7 @@ type private Solace
         override _.DisposeAsync() =
             if terminationReason.TrySetResult() then
                 logger.LogDebug("Terminating normally because of dispose")
-                writer.TryComplete() |> ignore
+                receiveChannel.Writer.TryComplete() |> ignore
             ValueTask terminated.Task
 
 module Solace =
@@ -126,10 +143,34 @@ module Solace =
         { new IDisposable with
             override _.Dispose() = f () }
 
+    let private fromSolaceMsg (solaceMsg : IMessage) : IncomingMetadata * RawMessage =
+        let metadata =
+            { SenderTimestamp =
+                match solaceMsg.SenderTimestamp with
+                | ts when ts < 0 -> DateTimeOffset.MinValue
+                | ts -> DateTimeOffset.FromUnixTimeMilliseconds ts
+              BrokerDiscardIndication = solaceMsg.DiscardIndication
+            }
+        let msg = { Topic = solaceMsg.Destination.Name
+                    ReplyTo =
+                        if isNull solaceMsg.ReplyTo || isNull solaceMsg.ReplyTo.Name
+                        then None
+                        else Some solaceMsg.ReplyTo.Name
+                    ContentType = Option.ofObj solaceMsg.HttpContentType
+                    ContentEncoding = Option.ofObj solaceMsg.HttpContentEncoding
+                    CorrelationId = Option.ofObj solaceMsg.CorrelationId
+                    SenderId = Option.ofObj solaceMsg.SenderId
+                    Payload =
+                        match solaceMsg.BinaryAttachment with
+                        | null -> [||]  // Empty array given to `BinaryAttachment` setter is translated to `null`.
+                        | attachment -> attachment
+                  }
+        metadata, msg
+
     let private spawnSolaceProcess
         (logger : ILogger)
         (props : SessionProperties)
-        (writer : ChannelWriter<IMessage>)
+        (receiveChannel : Channel<IncomingMetadata * RawMessage>)
         (connectResult : TaskCompletionSource<ISolace>) = backgroundTask {
 
         use _ = defer (fun () -> logger.LogDebug("Solace process stopped"))
@@ -139,7 +180,7 @@ module Solace =
         let terminateWithException (e : exn) =
             if terminationReason.TrySetException(e) then
                 logger.LogError(e, "Terminating because of error")
-                writer.TryComplete(e) |> ignore
+                receiveChannel.Writer.TryComplete(e) |> ignore
 
         let terminated = TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)
 
@@ -168,8 +209,8 @@ module Solace =
                     context.CreateSession(
                         props,
                         (fun _ args ->
-                            if writer.TryWrite(args.Message) |> not then
-                                args.Message.Dispose()
+                            use solaceMessage = args.Message
+                            if receiveChannel.Writer.TryWrite(fromSolaceMsg solaceMessage) |> not then
                                 Exception "Message channel full"
                                 |> terminateWithException),
                         (fun _ args ->
@@ -198,13 +239,15 @@ module Solace =
                 // to exception and call `terminateWithException`.
                 do! connected.Task
 
-                Solace(logger, session, canSend, terminationReason, writer, terminated)
+                Solace(logger, session, canSend, terminationReason, receiveChannel, terminated)
                 |> connectResult.SetResult
 
                 logger.LogDebug("Solace session connected, waiting for termination")
                 do! terminationReason.Task
 
-                // Disconnect is skipped if `terminationReason` contains exception.
+                // `Disconnect` is skipped if `terminationReason` contains exception.
+                // `DisposeAsync` doesn't put exception into `terminationReason` so
+                // `Disconnect` is run when user calls `DisposeAsync`.
                 logger.LogDebug("Disconnecting Solace session")
                 match session.Disconnect() with
                 | ReturnCode.SOLCLIENT_OK -> ()
@@ -227,6 +270,8 @@ module Solace =
 
     let createSessionProperties () =
         let props = SessionProperties()
+
+        // These settings are enforced by `checkSessionProperties`.
         props.ConnectBlocking <- false
         props.SubscribeBlocking <- true
         props.SendBlocking <- false
@@ -234,6 +279,8 @@ module Solace =
         props.TopicDispatch <- false
         props.ReconnectRetries <- 0
         props.IgnoreDuplicateSubscriptionError <- false
+        // These settings are recommended but not enforced.
+        props.GenerateSendTimestamps <- true
         props
 
     let private checkSessionProperties (props : SessionProperties) =
@@ -252,10 +299,23 @@ module Solace =
         if props.IgnoreDuplicateSubscriptionError then
             failwith $"%s{nameof props.IgnoreDuplicateSubscriptionError} must be false"
 
-    let connect (logger : ILogger) (props : SessionProperties) (writer : ChannelWriter<IMessage>) = backgroundTask {
+    // Accepting user supplied `ChannelWriter` instead of `receiveChannelCapacity` would be
+    // certainly more flexible choice. Because user can implement additional logic into
+    // custom `ChannelWriter`. That's also the crux of the problem. Because this
+    // logic can throw exceptions, block calling thread, or even call other Solace functions.
+    // Since `ChannelWriter` is used in Solace event handlers which are invoked from Solace context thread
+    // then the above mentioned actions may have fatal consequences
+    // (eg. calling certain Solace functions from event handler can lead to segmentation fault).
+    // To prevent these problems we create `Channel` ourselves and expose `ChannelReader`.
+    let connect
+        (logger : ILogger)
+        (props : SessionProperties)
+        (receiveChannelCapacity : int) = backgroundTask {
+
         checkSessionProperties props
+        let receiveChannel = Channel.CreateBounded<IncomingMetadata * RawMessage>(receiveChannelCapacity)
 
         let connectResult = TaskCompletionSource<ISolace>()
-        let _ = spawnSolaceProcess logger props writer connectResult
+        let _ = spawnSolaceProcess logger props receiveChannel connectResult
         return! connectResult.Task
     }

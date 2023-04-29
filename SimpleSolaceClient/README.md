@@ -1,4 +1,4 @@
-# Scenarios to try
+# What shall be tested before each release
 
 - Not connected to Solace because of:
   - Host does not exist.
@@ -13,8 +13,9 @@
   - Topic which is already subscribed.
   - Topic which is not subscribed.
   - Invalid topic pattern.
-- Normally disconnected from Solace.
+- Dispose ISolace immediately after sending some messages (messages should be delivered to broker).
 - Disconnected from Solace because of:
   - Network connection down (eg. Wi-Fi turned off).
   - VPN down.
   - Message channel gets full.
+- Send lots of messages so that ISolace must wait for CanSend session event.

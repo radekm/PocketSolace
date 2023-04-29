@@ -1,5 +1,4 @@
 ﻿open System
-open System.Threading.Channels
 open System.Threading.Tasks
 
 open Microsoft.Extensions.Logging
@@ -25,45 +24,50 @@ let main _ =
 
     Solace.initGlobalContextFactory SolLogLevel.Notice solaceClientLogger
 
-    let channel = Channel.CreateBounded<IMessage>(512)
-
-    let channelTask = backgroundTask {
-        let mutable stop = false
-        let mutable n = 0
-        while not stop do
-            match! channel.Reader.WaitToReadAsync() with
-            | false -> stop <- true
-            | true ->
-                use! _message = channel.Reader.ReadAsync()
-                n <- n + 1
-        Console.WriteLine("{0} messages received", n)
-    }
-
     let sessionTask = backgroundTask {
-        use! solace = Solace.connect pocketSolaceLogger props channel.Writer
+        use! solace = Solace.connect pocketSolaceLogger props 512
         do! solace.Subscribe(testTopic)
 
-        let _sendTask = backgroundTask {
-            try
-                for i in 1 .. 500_000 do
-                    use topic = solace.CreateTopic(testTopic)
-                    use msg = solace.CreateMessage()
-                    msg.Destination <- topic
-                    msg.BinaryAttachment <- System.Text.Encoding.UTF8.GetBytes $"Message %d{i}"
-                    do! solace.Send(msg)
-
-                    if i % 10_000 = 0 then
-                        Console.WriteLine("{0} messages sent", i)
-            with e -> Console.WriteLine("Sending failed with {0}", e)
+        let receiveTask = backgroundTask {
+            let mutable stop = false
+            let mutable n = 0
+            while not stop do
+                match! solace.Received.WaitToReadAsync() with
+                | false -> stop <- true
+                | true ->
+                    let _message = solace.Received.ReadAsync()
+                    n <- n + 1
+            Console.WriteLine("{0} messages received", n)
         }
 
-        // Stay connected for 20 seconds.
-        do! Task.Delay(20_000)
+        try
+            for i in 1 .. 500_000 do
+                let msg = { Topic = testTopic
+                            ReplyTo = None
+                            ContentType = None
+                            ContentEncoding = None
+                            CorrelationId = None
+                            SenderId = None
+                            Payload = System.Text.Encoding.UTF8.GetBytes $"Message %d{i}"
+                          }
+                do! solace.Send(msg)
 
-        // Not necessary.
-        do! solace.Unsubscribe(testTopic)
+                if i % 10_000 = 0 then
+                    Console.WriteLine("{0} messages sent", i)
+        with e -> Console.WriteLine("Sending failed with {0}", e)
+
+        // Stay connected for 5 seconds after sending completes
+        // so there's enough time to receive all messages.
+        // Without this `Delay` all messages would be sent but there won't be enough
+        // time to receive them.
+        do! Task.Delay(5_000)
+
+        // `DisposeAsync` marks channel with received messages as complete.
+        // `receiveTask` then reaches the last message and stops.
+        do! solace.DisposeAsync()
+        do! receiveTask
     }
 
-    Task.WaitAll(channelTask, sessionTask)
+    Task.WaitAll(sessionTask)
 
     0
