@@ -8,6 +8,8 @@ open PocketSolace
 
 [<EntryPoint>]
 let main _ =
+    let simulateSlowConsumer = false
+
     let loggerFactory = LoggerFactory.Create(fun l -> l.AddConsole().SetMinimumLevel(LogLevel.Debug) |> ignore)
     let solaceClientLogger = loggerFactory.CreateLogger("Solace Client")
     let pocketSolaceLogger = loggerFactory.CreateLogger("Pocket Solace")
@@ -36,7 +38,22 @@ let main _ =
                 | false -> stop <- true
                 | true ->
                     let _message = solace.Received.ReadAsync()
+
+                    // If `simulateSlowConsumer` is true then the channel with received messages
+                    // will quickly fill up because consumer is much slower than producer.
+                    // Message handler will be unable to add received message
+                    // into the channel and Solace session and Solace context will be destroyed.
+                    // `TerminationReason` will be set to exception and the same exception will
+                    // be used to complete the channel with received messages.
+                    //
+                    // In this program publisher will fail with exception immediately
+                    // but consumer will run until it consumes all received messages.
+                    // After consuming the last message `WaitToReadAsync` will raise the exception
+                    // which was used to complete the channel.
+                    if simulateSlowConsumer then
+                        do! Task.Delay(50)
                     n <- n + 1
+
             Console.WriteLine("{0} messages received", n)
         }
 
