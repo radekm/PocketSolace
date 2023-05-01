@@ -7,13 +7,9 @@
         <PackageId>PocketSolace</PackageId>
         <PackageVersion>0.2.2</PackageVersion>
         <Authors>Radek Micek</Authors>
-        <Copyright>Copyright (c) Radek Micek 2022</Copyright>
-        <PackageLicenseExpression>MIT</PackageLicenseExpression>
-        <Description>
-            Package for subscribing to Solace direct messages from F#.
-            Provided interface fits nicely in async code using
-            System.Threading.Tasks and Microsoft.Extensions.Logging.
-        </Description>
+        <Copyright>Copyright (c) Radek Micek 2022-2023</Copyright>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+        <PackageLicenseFile>LICENSE.txt</PackageLicenseFile>
 
         <!-- Source Link -->
         <PublishRepositoryUrl>true</PublishRepositoryUrl>
@@ -28,6 +24,8 @@
     </ItemGroup>
 
     <ItemGroup>
+        <None Include="..\README.md" Pack="true" PackagePath="\" />
+        <None Include="..\LICENSE.txt" Pack="true" PackagePath="\" />
         <Compile Include="Types.fs" />
         <Compile Include="Library.fs" />
     </ItemGroup>
