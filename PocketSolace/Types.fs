@@ -10,8 +10,7 @@ type IncomingMetadata =
       BrokerDiscardIndication : bool
     }
 
-/// `'T` should use structural equality.
-type Message<'T> =
+type RawMessage =
     { // Topics.
       Topic : string
       ReplyTo : string option
@@ -22,7 +21,5 @@ type Message<'T> =
       CorrelationId : string option
       SenderId : string option
 
-      Payload : 'T
+      Payload : byte[]
     }
-
-type RawMessage = Message<byte[]>
