@@ -60,7 +60,6 @@ let main _ =
         try
             for i in 1 .. 500_000 do
                 let msg = { Topic = testTopic
-                            ReplyTo = None
                             ContentType = None
                             ContentEncoding = None
                             CorrelationId = None

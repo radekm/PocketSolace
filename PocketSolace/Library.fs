@@ -57,7 +57,6 @@ type private Solace
     let toSolaceMsg (msg : RawMessage) : IMessage =
         let solaceMsg = session.CreateMessage()
         solaceMsg.Destination <- ContextFactory.Instance.CreateTopic msg.Topic
-        msg.ReplyTo |> Option.iter (fun x -> solaceMsg.ReplyTo <- ContextFactory.Instance.CreateTopic x)
         msg.ContentType |> Option.iter (fun x -> solaceMsg.HttpContentType <- x)
         msg.ContentEncoding |> Option.iter (fun x -> solaceMsg.HttpContentEncoding <- x)
         msg.CorrelationId |> Option.iter (fun x -> solaceMsg.CorrelationId <- x)
@@ -152,14 +151,12 @@ module Solace =
               BrokerDiscardIndication = solaceMsg.DiscardIndication
             }
         let msg = { Topic = solaceMsg.Destination.Name
-                    ReplyTo =
-                        if isNull solaceMsg.ReplyTo || isNull solaceMsg.ReplyTo.Name
-                        then None
-                        else Some solaceMsg.ReplyTo.Name
+
                     ContentType = Option.ofObj solaceMsg.HttpContentType
                     ContentEncoding = Option.ofObj solaceMsg.HttpContentEncoding
                     CorrelationId = Option.ofObj solaceMsg.CorrelationId
                     SenderId = Option.ofObj solaceMsg.SenderId
+
                     Payload =
                         match solaceMsg.BinaryAttachment with
                         | null -> [||]  // Empty array given to `BinaryAttachment` setter is translated to `null`.
