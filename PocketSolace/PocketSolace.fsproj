@@ -21,6 +21,7 @@
     <!-- Source Link -->
     <ItemGroup>
         <PackageReference Include="Microsoft.SourceLink.GitHub" Version="1.1.1" PrivateAssets="All" />
+        <PackageReference Update="FSharp.Core" Version="6.0.7" />
     </ItemGroup>
 
     <ItemGroup>
@@ -31,8 +32,8 @@
     </ItemGroup>
 
     <ItemGroup>
-      <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="6.0.2" />
-      <PackageReference Include="SolaceSystems.Solclient.Messaging" Version="10.21.0" />
+      <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="6.0.4" />
+      <PackageReference Include="SolaceSystems.Solclient.Messaging" Version="10.22.0" />
     </ItemGroup>
 
 </Project>
